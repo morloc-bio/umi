@@ -1,0 +1,76 @@
+--' The umi test suite
+module umi.test (test)
+
+import root
+import root-py
+import bio
+import stream
+import dup
+import umi
+import unittest
+
+record Py => DupKeys = "dict"
+record Py => UmiKeep = "dict"
+record Py => UmiDigest = "dict"
+
+source Py from "umi-test.py"
+  ( "write_pairs" as writePairs
+  , "check_extract" as checkExtract
+  , "umi_sets" as umiSets
+  , "check_clusters" as checkClusters
+  , "fragments" as fragments
+  , "dedup" as dedupOracle
+  , "kept" as keptOracle
+  , "tmp_dir" as tmpDir
+  , "same_key" as sameKey
+  )
+
+writePairs :: Int -> Int -> <IO> Str
+checkExtract :: Str -> Str -> Str -> Str -> <IO> Str
+umiSets :: Int -> Int -> [[(Str, Int)]]
+checkClusters :: [[(Str, Int)]] -> [[[Str]]] -> Str
+fragments :: Int -> Int -> (DupKeys, [Str], [U64])
+dedupOracle :: (DupKeys, [Str], [U64]) -> (Int, Int)
+keptOracle :: (DupKeys, [Str], [U64]) -> [Bool]
+tmpDir :: <IO> Str
+sameKey :: Int -> DupKeys
+
+frags :: (DupKeys, [Str], [U64])
+frags = fragments 5 3000
+
+-- Deduplicate records through a sorter that spills to disk.
+keepOf :: Str -> Int -> [U64] -> <IO> UmiKeep
+keepOf d n rs = do
+  h <- openSorter d 4 1
+  pushSorter h rs
+  k <- umiKeepSorted n (nextSorted h)
+  closeSorter h
+  k
+
+testUmi :: Results -> <IO> Results
+testUmi s0 = do
+  p <- writePairs 200 3
+  writeFastqPairs (p <> "-x_1.fq") (p <> "-x_2.fq")
+    (\sink -> readFastqPairs (p <> "_1.fq") (p <> "_2.fq") (\xs -> sink (extractUmiPairs "NNNXXNNN" xs)))
+  msg <- checkExtract p "NNNXXNNN" (p <> "-x_1.fq") (p <> "-x_2.fq")
+  let sets = umiSets 11 300
+  d <- tmpDir
+  let rs = umiRecords (.0 frags) (.1 frags) (.2 frags)
+  k <- keepOf d 3000 rs
+  let first = umiRecords (.0 frags) (.1 frags) (.2 frags)
+  lens <- keepOf d 3 (umiRecords (sameKey 3) ["A", "AA", "AAA"] [0, 1, 2])
+  ( testEqual "extraction moves the UMI into both headers" msg ""
+  . testEqual "a header's UMI" (umiOfHeader "r1_ACGTAC 1:N:0") "ACGTAC"
+  . testEqual "directional clusters match the oracle" (checkClusters sets (map umiClusters sets)) ""
+  . testEqual "deduplication counts match the oracle" (.fragments k, .molecules k) (dedupOracle frags)
+  . testEqual "each molecule keeps its first fragment" (keepFragments k (.2 frags)) (keptOracle frags)
+  . testTrue "the digest of the records matches the sorted walk's" (sameUmiDigest (umiDigest rs) (.digest k))
+  . testTrue "digests of halves merge to the whole"
+      (sameUmiDigest (mergeUmiDigest (umiDigest (.[0:400] rs)) (umiDigest (.[400:] rs))) (umiDigest first))
+  . testTrue "a missing record changes the digest" (not (sameUmiDigest (umiDigest (.[4:] rs)) (.digest k)))
+  . testEqual "UMIs of different lengths are different molecules" (.molecules lens) 3
+  . testEqual "stream indices" (streamIndices 10 [0, 2, 5]) [10, 12, 15]
+  ) s0
+
+test :: <IO> Bool
+test = suiteE (groupE "UMIs" testUmi)

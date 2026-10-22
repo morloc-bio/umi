@@ -1,0 +1,165 @@
+--' Unique molecular identifiers, as umi_tools handles them
+--'
+--' Extraction (umi_tools extract, string method): a pattern over the start
+--' of read 1, `N` for a UMI base and `X` for a base kept in the read, e.g.
+--' "NNNNNNNN" or "NNNXXNNN". The UMI bases are removed from read 1 (with
+--' their qualities) and appended to both mates' headers as "_<UMI>" on the
+--' first word. Reads shorter than the pattern are an error.
+--'
+--' Deduplication (umi_tools dedup, directional method): fragments sharing a
+--' position key (dup) are grouped by UMI; UMI a absorbs UMI b when they
+--' differ at one base and count(a) >= 2 count(b) - 1; each connected group
+--' reached from the most frequent UMI not yet reached is one molecule. UMIs
+--' of equal counts are visited in UMI order (umi_tools visits them in the
+--' order it met them). A molecule is represented by its first fragment in
+--' the stream (umi_tools takes the highest mapping quality).
+--'
+--' A sample is deduplicated out of core: each keyed fragment gives a record
+--' of four U64 words (position key, packed UMI, its index in the stream),
+--' the records are sorted (stream's sorter), and `umiKeepSorted` walks them
+--' once, holding one position's UMIs at a time. The result marks the
+--' representatives in a bitmap of the stream's fragments. A UMI is packed 3
+--' bits a base (A 1, C 2, G 3, T 4, N 5; first base highest), so UMIs of
+--' different lengths never collide; more than 21 bases, or another letter,
+--' is an error.
+module umi
+  ( UmiDigest
+  , UmiKeep
+  , extractUmiPairs
+  , extractUmiReads
+  , umiOfHeader
+  , umiClusters
+  , umiRecords
+  , streamIndices
+  , umiDigest
+  , mergeUmiDigest
+  , sameUmiDigest
+  , umiKeepSorted
+  , umiKeepSortedNative
+  , keepFragments
+  , umiDedupText
+  )
+
+import root
+import bio
+import dup
+import stream as stream
+
+--' Move the UMI out of read 1 of each pair
+extractUmiPairs ::
+  --' UMI pattern, e.g. "NNNXXNNN"
+  Str ->
+  [ReadPair] ->
+  [ReadPair]
+
+--' Move the UMI out of each single-end read
+extractUmiReads ::
+  --' UMI pattern, e.g. "NNNXXNNN"
+  Str ->
+  [FastqEntry] ->
+  [FastqEntry]
+
+--' The UMI a read header carries
+--'
+--' The text after the last '_' of its first word.
+umiOfHeader ::
+  --' Read header
+  Str ->
+  Str
+
+--' umi_tools' directional clusters of UMIs
+umiClusters ::
+  --' UMIs with their counts
+  [(Str, Int)] ->
+  [[Str]]
+
+--' The UMI records of a batch, flat
+--'
+--' For each fragment with a key, four words: its key's two words, its
+--' packed UMI and its index in the stream.
+umiRecords ::
+  --' The batch's duplicate keys
+  DupKeys ->
+  --' Each fragment's UMI
+  [Str] ->
+  --' Each fragment's index in the stream
+  [U64] ->
+  [U64]
+
+--' Stream indices of a batch: an offset plus each index
+streamIndices ::
+  --' Stream index of the batch's first fragment
+  U64 ->
+  --' Indices in the batch
+  [U32] ->
+  [U64]
+
+--' A digest of UMI records, equal for one multiset in any order
+record UmiDigest where
+  --' Records seen
+  records :: Int
+  --' Wrapping sum of a hash of each record
+  hash :: U64
+
+--' The digest of a batch of UMI records
+umiDigest ::
+  --' UMI records, four words each
+  [U64] ->
+  UmiDigest
+
+--' Add two UMI digests
+mergeUmiDigest :: UmiDigest -> UmiDigest -> UmiDigest
+
+--' Whether two UMI digests are equal
+sameUmiDigest :: UmiDigest -> UmiDigest -> Bool
+
+--' The representatives of a sample's molecules
+record UmiKeep where
+  --' Representatives, one bit per fragment
+  --'
+  --' Bit i of word i / 64 is set when the fragment with stream index i
+  --' represents its molecule.
+  bitmap :: [U64]
+  --' Fragments that had a key
+  fragments :: Int
+  --' Molecules
+  molecules :: Int
+  --' Digest of the records
+  digest :: UmiDigest
+
+--' Deduplicate the sorted UMI records of a stream of fragments
+umiKeepSorted ::
+  --' Fragments in the stream
+  Int ->
+  --' Pull of the sorted UMI records
+  <IO> (Try Str [U64]) ->
+  <IO> UmiKeep
+umiKeepSorted n pull = umiKeepSortedNative n (stream.pullTriple pull)
+
+--' `umiKeepSorted` over a pull in its native form
+umiKeepSortedNative :: Int -> <IO> (Bool, Str, [U64]) -> <IO> UmiKeep
+
+--' Whether each fragment represents its molecule
+keepFragments ::
+  UmiKeep ->
+  --' Stream indices of the fragments
+  [U64] ->
+  [Bool]
+
+--' umi_tools dedup's statistics in MultiQC custom content
+--'
+--' Fragments with a position, molecules, and the percent removed as
+--' duplicates.
+umiDedupText ::
+  --' Sample name
+  Str ->
+  UmiKeep ->
+  Str
+
+-- Summaries as monoids, for `<>` and `mempty`.
+
+instance Semigroup UmiDigest where
+  (<>) a b = mergeUmiDigest a b
+
+instance Monoid UmiDigest where
+  mempty = umiDigest []

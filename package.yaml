@@ -1,0 +1,11 @@
+name: umi
+version: 0.1.0
+homepage: null
+synopsis: UMI extraction and directional deduplication
+description: umi_tools-style UMI extraction from read 1 and directional UMI clustering per position key, with deduplication counts as a mergeable table.
+category: bioinformatics
+license: MIT
+author: "Zebulun Arendsee"
+maintainer: "z@morloc.io"
+github: null
+bug-reports: null
